@@ -83,14 +83,27 @@ def generate_cover_image(prompt):
         raise Exception(f"封面图生成失败: {resp.status_code}")
 
 def get_access_token(appid, secret):
-    url = "https://api.weixin.qq.com/cgi-bin/token"
-    params = {
-        "grant_type": "client_credential",
-        "appid": appid,
-        "secret": secret
-    }
-    r = requests.get(url, params=params).json()
+    url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}"
+    resp = requests.get(url)
+    resp.raise_for_status() # 先判断HTTP请求是否成功
+    r = resp.json()
+    print("微信接口返回完整内容：", r) # 关键：打印完整返回
+    if "errcode" in r and r["errcode"] != 0:
+        raise Exception(f"获取access_token失败：错误码 {r['errcode']}，错误信息 {r['errmsg']}")
+    if "access_token" not in r:
+        raise Exception("微信返回中无access_token字段，完整返回：" + str(r))
     return r["access_token"]
+
+# 读取环境变量（确认变量名和日志中的一致）
+WX_APPID = os.getenv("WX_APPID")
+WX_SECRET = os.getenv("WX_SECRET")
+
+# 增加环境变量检查
+if not WX_APPID or not WX_SECRET:
+    raise Exception("WX_APPID 或 WX_SECRET 环境变量未正确配置")
+
+token = get_access_token(WX_APPID, WX_SECRET)
+print("获取到的access_token：", token[:20] + "...") # 打印前20位确认获取成功
 
 def upload_permanent_image(access_token, img_bytes):
     """上传图片作为永久素材，返回 media_id 和 url"""
