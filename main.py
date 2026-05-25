@@ -7,6 +7,8 @@ from email.mime.base import MIMEBase
 from email import encoders
 import requests
 import feedparser
+import time
+from typing import List, Dict, Optional
 from openai import OpenAI
 import markdown2
 import re
@@ -20,13 +22,176 @@ SENDER_EMAIL = os.environ["SENDER_EMAIL"]
 SENDER_PASSWORD = os.environ["SENDER_PASSWORD"]  # 邮箱授权码
 RECEIVER_EMAIL = os.environ["RECEIVER_EMAIL"]
 
-# 药学 RSS 源，可自由增删（注意：国外源可能需要科学上网，国内源更稳妥）
+# --------------------------
+# 扩充后 RSS 源列表（国际顶刊+行业媒体+监管+国内医药）
+# --------------------------
 RSS_SOURCES = [
-    # 中文药学源（示例，请换成真实 RSS 地址）
-    "https://www.dxy.cn/bbs/feed/rss/2",            # 丁香园药学频道（示例）
-    # "https://news.yaozh.com/rss.xml",             # 药智网新闻（需确认真实地址）
-    # 若没有合适的国内源，可以先用固定占位文本测试
+    # 国际权威期刊
+    {
+        "name": "Nature Reviews Drug Discovery",
+        "url": "https://www.nature.com/nrd.rss"
+    },
+    {
+        "name": "The Lancet Pharmacology",
+        "url": "https://www.thelancet.com/rss/originalArticles?series=pharmacology"
+    },
+    {
+        "name": "PubMed 药学资讯",
+        "url": "https://www.nlm.nih.gov/rss/auto/PubMedNews.rss"
+    },
+    {
+        "name": "APSB 药学学报英文版",
+        "url": "https://www.apsb.org/rss"
+    },
+    # 国际医药行业媒体
+    {
+        "name": "FiercePharma",
+        "url": "https://www.fiercepharma.com/rss"
+    },
+    {
+        "name": "PharmaTimes",
+        "url": "https://www.pharmatimes.com/rss"
+    },
+    {
+        "name": "STAT News 医药板块",
+        "url": "https://www.statnews.com/feed/category/pharma/"
+    },
+    {
+        "name": "Medscape 临床药学",
+        "url": "https://www.medscape.com/cx/rssfeeds/2704.html"
+    },
+    # 欧美药品监管机构
+    {
+        "name": "FDA 药品安全警示",
+        "url": "https://www.drugs.com/fda_alerts.rss"
+    },
+    {
+        "name": "EMA 欧洲药管局新闻",
+        "url": "https://www.ema.europa.eu/en/rss-feeds/news"
+    },
+    {
+        "name": "DailyMed 药品说明书更新",
+        "url": "https://dailymed.nlm.nih.gov/dailymed/rss-updates.cfm"
+    },
+    # 国内医药资讯
+    {
+        "name": "药智网行业动态",
+        "url": "https://www.yaozh.com/news/rss/"
+    },
+    {
+        "name": "医药魔方资讯",
+        "url": "https://www.pharmcube.com/news/rss"
+    }
 ]
+
+# 请求头（模拟浏览器，防止拦截）
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+# 采集配置
+MAX_RETRIES = 2    # 单源最大重试次数
+TIMEOUT = 10       # 单次请求超时(秒)
+LIMIT_NEWS = 10    # 最终展示最大新闻条数
+
+
+# --------------------------
+# 单源RSS采集函数（带重试、异常捕获）
+# --------------------------
+def fetch_rss_feed(source: Dict) -> Optional[List[Dict]]:
+    url = source["url"]
+    name = source["name"]
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+            resp.raise_for_status()
+
+            feed = feedparser.parse(resp.text)
+            if feed.bozo != 0:
+                raise ValueError(f"RSS解析异常，错误码：{feed.bozo}")
+
+            entries = []
+            for entry in feed.entries:
+                entries.append({
+                    "title": entry.get("title", "无标题"),
+                    "link": entry.get("link", ""),
+                    "summary": entry.get("summary", ""),
+                    "published": entry.get("published", ""),
+                    "source": name
+                })
+
+            print(f"✅ [{name}] 采集成功，共 {len(entries)} 条")
+            return entries
+
+        except Exception as e:
+            print(f"⚠️ [{name}] 第 {attempt+1} 次失败：{str(e)}")
+            time.sleep(1)
+
+    print(f"❌ [{name}] 多次重试后采集失败")
+    return None
+
+
+# --------------------------
+# 多源汇总主函数
+# --------------------------
+def fetch_all_pharma_news() -> List[Dict]:
+    all_news = []
+    for source in RSS_SOURCES:
+        res = fetch_rss_feed(source)
+        if res:
+            all_news.extend(res)
+
+    if not all_news:
+        print("❌ 全部RSS源采集失败，今日无药学新闻")
+    else:
+        print(f"✅ 总计采集到 {len(all_news)} 条药学相关新闻")
+    return all_news
+
+
+# --------------------------
+# 生成日报Markdown（兼容原有逻辑）
+# --------------------------
+def generate_daily_md(news_list: List[Dict]) -> str:
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if not news_list:
+        md = f"""
+# 药学前沿日报 ({today})
+
+今日新闻抓取异常：RSS源待检
+
+**摘要**：本日本未成功抓取到任何药学相关新闻。系统提示RSS源可能失效或内容缺失，建议调整源配置或手动补充来源。
+
+💡 点评：新闻源的空窗期提醒我们，数据采集的稳定性是信息工作的基石。建议尽快检查RSS源可用性，或临时切换至备用源。
+
+【配图关键词：无图】
+        """.strip()
+        return md
+
+    # 截取指定条数新闻
+    show_news = news_list[:LIMIT_NEWS]
+    md = f"# 药学前沿日报 ({today})\n\n今日共采集到 {len(news_list)} 条药学相关资讯，精选如下：\n\n"
+    for item in show_news:
+        md += f"## [{item['title']}]({item['link']})\n"
+        md += f"来源：{item['source']} | 发布时间：{item['published']}\n\n"
+        md += f"{item['summary']}\n\n---\n\n"
+    return md
+
+
+# --------------------------
+# 入口调用（直接对接原有转换、发邮件逻辑）
+# --------------------------
+if __name__ == "__main__":
+    news_data = fetch_all_pharma_news()
+    md_content = generate_daily_md(news_data)
+    # 下方继续衔接你原有的 markdown_to_wechat_html、发送邮件代码即可
+    print("Markdown 日报生成完成")
 
 # ---------- 工具函数 ----------
 def fetch_news():
