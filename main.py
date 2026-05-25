@@ -1,22 +1,30 @@
 import os
-import json
 import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 import requests
 import feedparser
 from openai import OpenAI
+import xie
 from datetime import datetime
 
-# ---------- 配置区 ----------
+# ---------- 配置区 (从 GitHub Secrets 读取) ----------
 DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
-WX_APPID = os.environ["WX_APPID"]
-WX_SECRET = os.environ["WX_SECRET"]
-PUSHPLUS_TOKEN = os.environ["PUSHPLUS_TOKEN"]
+SMTP_SERVER = os.environ["SMTP_SERVER"]        # 例如 smtp.qq.com
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+SENDER_EMAIL = os.environ["SENDER_EMAIL"]
+SENDER_PASSWORD = os.environ["SENDER_PASSWORD"]  # 邮箱授权码
+RECEIVER_EMAIL = os.environ["RECEIVER_EMAIL"]
 
-# 这里放你要抓取的药学 RSS 源，可自由增删
+# 药学 RSS 源，可自由增删（注意：国外源可能需要科学上网，国内源更稳妥）
 RSS_SOURCES = [
-    "https://www.drugs.com/feeds/news.xml",                # 英文，可能需要科学上网
-    "https://www.fda.gov/about-fda/contact-fda/rss-feeds", # FDA 新闻
-    # 国内的例子，如“药智网”等可以自行搜索 RSS 添加
+    # 中文药学源（示例，请换成真实 RSS 地址）
+    "https://www.dxy.cn/bbs/feed/rss/2",            # 丁香园药学频道（示例）
+    # "https://news.yaozh.com/rss.xml",             # 药智网新闻（需确认真实地址）
+    # 若没有合适的国内源，可以先用固定占位文本测试
 ]
 
 # ---------- 工具函数 ----------
@@ -26,29 +34,30 @@ def fetch_news():
     for url in RSS_SOURCES:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:10]:  # 每个源取前10条
-                items.append(f"标题：{entry.title}\n链接：{entry.link}\n摘要：{entry.summary[:200]}\n")
-        except:
+            for entry in feed.entries[:10]:
+                summary = entry.get("summary", "") or entry.get("description", "")
+                items.append(f"标题：{entry.title}\n链接：{entry.link}\n摘要：{summary[:200]}\n")
+        except Exception:
             continue
     if not items:
-        # 如果抓取失败，用一个测试占位内容保证流程继续
-        return "1. 标题：FDA今日未有更新\n摘要：请检查RSS源连接\n"
+        # 占位内容，防止流程中断，同时提醒你检查 RSS
+        return "1. 标题：今日无新闻抓取\n摘要：请检查RSS源是否可用，或替换为真实中文源。\n"
     return "\n".join(items)
 
 def call_deepseek(news_text):
-    """调用 DeepSeek API 生成日报内容和封面关键词"""
+    """调用 DeepSeek API 生成 Markdown 日报和封面关键词"""
     client = OpenAI(
         api_key=DEEPSEEK_API_KEY,
         base_url="https://api.deepseek.com/v1"
     )
-    system_prompt = """你是一位药学情报编辑。根据以下今日新闻，生成一篇可直接发微信公众号的日报。
+    system_prompt = """你是一位药学情报编辑。根据以下今日新闻，生成一篇可直接发微信公众号的 Markdown 格式日报。
 要求：
-1. 首先输出一行“封面关键词：xxx”，用于生成封面图，关键词为英文、药学科技相关，例如"Pharmaceutical news, molecule structure, blue technology background"。
-2. 然后输出 Markdown 格式的日报正文：
-   - 一级标题：# 药学前沿日报 YYYY-MM-DD
-   - 新闻标题用 ###，正文正常段落，点评用 > 引用格式。
-   - 每条新闻后标注【配图关键词：xxx】（英文，如"KRAS inhibitor illustration"），用于后续配图，如果没有合适配图则标注“无图”。
-3. 风格专业但不枯燥，像“医药魔方”的调性。"""
+1. 第一行单独输出：封面关键词：<英文描述，用于生成封面图，如"Pharmaceutical news, molecular structure, blue technology background">。
+2. 之后输出日报正文：
+   - 一级标题：# 药学前沿日报 (YYYY-MM-DD)
+   - 每条新闻用 ### 标题，正文正常段落，点评用 > 引用格式（前面加“💡 点评：”）。
+   - 每条新闻后添加【配图关键词：xxx】（英文，若无合适图则标注“无图”）。
+3. 语言专业但不枯燥，类似“医药魔方”风格。"""
     today = datetime.now().strftime("%Y-%m-%d")
     user_message = f"今天是 {today}，以下是今日新闻素材：\n{news_text}"
 
@@ -63,18 +72,17 @@ def call_deepseek(news_text):
     )
     return response.choices[0].message.content
 
-def parse_cover_keyword(daily_text):
-    """提取封面关键词"""
-    match = re.search(r"封面关键词[：:]\s*(.+)", daily_text)
+def parse_cover_keyword(daily_raw):
+    """提取封面关键词和正文 Markdown"""
+    match = re.search(r"封面关键词[：:]\s*(.+)", daily_raw)
     if match:
         keyword = match.group(1).strip()
-        # 删除关键词行，剩余正文
-        body = daily_text.replace(match.group(0), "").strip()
+        body = daily_raw.replace(match.group(0), "").strip()
         return keyword, body
-    return "Pharmaceutical news abstract background", daily_text
+    return "Pharmaceutical news abstract background", daily_raw
 
 def generate_cover_image(prompt):
-    """使用 Pollinations.ai 生成封面图，返回图片二进制数据"""
+    """使用 Pollinations.ai 生成封面图，返回二进制数据"""
     url = f"https://image.pollinations.ai/prompt/{prompt}?width=900&height=500&nologo=true"
     resp = requests.get(url, timeout=60)
     if resp.status_code == 200:
@@ -82,116 +90,68 @@ def generate_cover_image(prompt):
     else:
         raise Exception(f"封面图生成失败: {resp.status_code}")
 
-def get_access_token(appid, secret):
-    url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}"
-    resp = requests.get(url)
-    resp.raise_for_status() # 先判断HTTP请求是否成功
-    r = resp.json()
-    print("微信接口返回完整内容：", r) # 关键：打印完整返回
-    if "errcode" in r and r["errcode"] != 0:
-        raise Exception(f"获取access_token失败：错误码 {r['errcode']}，错误信息 {r['errmsg']}")
-    if "access_token" not in r:
-        raise Exception("微信返回中无access_token字段，完整返回：" + str(r))
-    return r["access_token"]
-
-# 读取环境变量（确认变量名和日志中的一致）
-WX_APPID = os.getenv("WX_APPID")
-WX_SECRET = os.getenv("WX_SECRET")
-
-# 增加环境变量检查
-if not WX_APPID or not WX_SECRET:
-    raise Exception("WX_APPID 或 WX_SECRET 环境变量未正确配置")
-
-token = get_access_token(WX_APPID, WX_SECRET)
-print("获取到的access_token：", token[:20] + "...") # 打印前20位确认获取成功
-
-def upload_permanent_image(access_token, img_bytes):
-    """上传图片作为永久素材，返回 media_id 和 url"""
-    url = f"https://api.weixin.qq.com/cgi-bin/material/add_material?access_token={access_token}&type=image"
-    files = {'media': ('cover.jpg', img_bytes, 'image/jpeg')}
-    r = requests.post(url, files=files).json()
-    return r["media_id"], r.get("url", "")  # url 需公众号后台或后续查询
-
 def markdown_to_wechat_html(md_text):
-    """超级简单的 Markdown 转微信 HTML（仅支持标题、段落、引用）"""
-    lines = md_text.split("\n")
-    html = '<section style="padding:10px;">\n'
-    in_quote = False
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("# "):
-            html += f'<p style="text-align:center;font-size:20px;font-weight:bold;">{line[2:]}</p >\n'
-        elif line.startswith("### "):
-            html += f'<p style="font-size:16px;font-weight:bold;margin-top:20px;">{line[4:]}</p >\n'
-        elif line.startswith(">"):
-            html += f'<p style="color:#888;font-size:14px;border-left:3px solid #1e88e5;padding-left:8px;">{line[1:].strip()}</p >\n'
-        else:
-            html += f'<p style="font-size:15px;">{line}</p >\n'
-    html += '</section>'
-    return html
+    """使用 Xie 将 Markdown 转换为微信合规的 HTML"""
+    # xie.convert 返回完整的 HTML 文档，我们只需要 body 里的内容
+    full_html = xie.convert(md_text)
+    # 提取 body 部分（去掉 html/head/body 标签）
+    body_match = re.search(r"<body[^>]*>(.*?)</body>", full_html, re.DOTALL)
+    if body_match:
+        return body_match.group(1).strip()
+    else:
+        # 如果失败，回退为简单替换
+        return md_text.replace("\n", "<br>")
 
-def create_draft(access_token, title, html_content, thumb_media_id):
-    url = f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={access_token}"
-    data = {
-        "articles": [{
-            "title": title,
-            "content": html_content,
-            "thumb_media_id": thumb_media_id,
-            "need_open_comment": 0,
-            "only_fans_can_comment": 0,
-            "content_source_url": "",
-            "digest": title + "，点击查看详细。",
-        }]
-    }
-    r = requests.post(url, json=data).json()
-    return r
+def send_email(html_content, cover_img_bytes, date_str):
+    """构建并发送邮件"""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"药学前沿日报 {date_str}"
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = RECEIVER_EMAIL
 
-def pushplus_notify(token, title, content):
-    url = "https://www.pushplus.plus/send"
-    data = {
-        "token": token,
-        "title": title,
-        "content": content,
-        "template": "html"
-    }
-    requests.post(url, json=data)
+    # 纯文本备用（如果邮件客户端不支持 HTML）
+    text_part = MIMEText("今日药学日报，请查看 HTML 版本。", "plain", "utf-8")
+    msg.attach(text_part)
+
+    # HTML 正文，直接封装
+    html_part = MIMEText(html_content, "html", "utf-8")
+    msg.attach(html_part)
+
+    # 封面图附件
+    attachment = MIMEBase("image", "jpeg")
+    attachment.set_payload(cover_img_bytes)
+    encoders.encode_base64(attachment)
+    attachment.add_header(
+        "Content-Disposition",
+        f"attachment; filename=cover_{date_str}.jpg"
+    )
+    msg.attach(attachment)
+
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.send_message(msg)
 
 # ---------- 主流程 ----------
 def main():
     # 1. 抓新闻
     news_text = fetch_news()
 
-    # 2. DeepSeek 生成日报
+    # 2. DeepSeek 生成 Markdown 日报
     daily_raw = call_deepseek(news_text)
 
     # 3. 提取封面关键词并生成封面图
-    cover_keyword, daily_body = parse_cover_keyword(daily_raw)
+    cover_keyword, daily_md = parse_cover_keyword(daily_raw)
     cover_img = generate_cover_image(cover_keyword)
 
-    # 4. 获取 access_token
-    token = get_access_token(WX_APPID, WX_SECRET)
+    # 4. 用 Xie 转换为微信合规 HTML
+    wechat_html = markdown_to_wechat_html(daily_md)
 
-    # 5. 上传封面素材
-    media_id, cover_url = upload_permanent_image(token, cover_img)
+    # 5. 发送邮件（HTML 正文 + 封面图附件）
+    today_str = datetime.now().strftime("%Y年%m月%d日")
+    send_email(wechat_html, cover_img, today_str)
 
-    # 6. 转换正文为 HTML
-    html_body = markdown_to_wechat_html(daily_body)
-
-    # 7. 创建草稿
-    today = datetime.now().strftime("%Y年%m月%d日")
-    title = f"药学前沿日报 {today}"
-    result = create_draft(token, title, html_body, media_id)
-    print("草稿创建结果:", result)
-
-    if "errcode" in result and result["errcode"] != 0:
-        notify_msg = f"日报生成失败：{result}"
-    else:
-        notify_msg = f"<h3>{title}</h3><p>草稿已创建成功，请打开订阅号助手App，在「草稿箱」找到并点击「群发」。</p >"
-
-    # 8. 推送到你的微信
-    pushplus_notify(PUSHPLUS_TOKEN, "📰 药学日报已生成", notify_msg)
+    print(f"日报已发送至 {RECEIVER_EMAIL}，请查收。")
 
 if __name__ == "__main__":
     main()
