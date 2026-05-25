@@ -8,7 +8,8 @@ from email import encoders
 import requests
 import feedparser
 from openai import OpenAI
-from wechat_format_py import convert_markdown
+import markdown2
+import re
 from datetime import datetime
 
 # ---------- 配置区 (从 GitHub Secrets 读取) ----------
@@ -91,15 +92,16 @@ def generate_cover_image(prompt):
         raise Exception(f"封面图生成失败: {resp.status_code}")
 
 def markdown_to_wechat_html(md_text):
-    """使用 wechat-format-py 将 Markdown 转换为微信合规的 HTML"""
-    full_html = convert_markdown(md_text)
-    # 提取 body 部分（去掉 html/head/body 标签）
+    """使用 markdown2 将 Markdown 转换为微信兼容的 HTML"""
+    # 转换为基础 HTML
+    full_html = markdown2.markdown(md_text, extras=["tables", "fenced-code-blocks", "footnotes"])
+    
+    # 提取 body 部分（如果需要的话）
     body_match = re.search(r"<body[^>]*>(.*?)</body>", full_html, re.DOTALL)
     if body_match:
         return body_match.group(1).strip()
     else:
-        # 如果失败，回退为简单替换
-        return md_text.replace("\n", "<br>")
+        return full_html.replace("\n", "<br>")
 
 def send_email(html_content, cover_img_bytes, date_str):
     """构建并发送邮件"""
