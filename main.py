@@ -8,7 +8,7 @@ from email import encoders
 import requests
 import feedparser
 from openai import OpenAI
-import xie
+from wechat_format_py import convert_markdown
 from datetime import datetime
 
 # ---------- 配置区 (从 GitHub Secrets 读取) ----------
@@ -91,9 +91,8 @@ def generate_cover_image(prompt):
         raise Exception(f"封面图生成失败: {resp.status_code}")
 
 def markdown_to_wechat_html(md_text):
-    """使用 Xie 将 Markdown 转换为微信合规的 HTML"""
-    # xie.convert 返回完整的 HTML 文档，我们只需要 body 里的内容
-    full_html = xie.convert(md_text)
+    """使用 wechat-format-py 将 Markdown 转换为微信合规的 HTML"""
+    full_html = convert_markdown(md_text)
     # 提取 body 部分（去掉 html/head/body 标签）
     body_match = re.search(r"<body[^>]*>(.*?)</body>", full_html, re.DOTALL)
     if body_match:
