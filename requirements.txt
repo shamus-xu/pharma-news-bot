@@ -1,4 +1,4 @@
 requests>=2.31.0
 feedparser>=6.0.10
 openai>=1.6.1
-wechat-format-py>=1.0.0
+markdown2>=2.4.10
