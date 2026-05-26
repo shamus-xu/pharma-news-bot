@@ -79,10 +79,6 @@ RSS_SOURCES = [
         "url": "https://www.yaozh.com/news/rss/"
     },
     {
-        "name": "医药魔方资讯",
-        "url": "https://www.pharmcube.com/news/rss"
-    }
-    {
         "name": "医药魔方行业动态",
         "url": "https://www.pharmacube.com/news/rss"
     },
