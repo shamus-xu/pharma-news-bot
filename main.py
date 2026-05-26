@@ -133,7 +133,7 @@ def fetch_rss_feed(source: Dict) -> Optional[List[Dict]]:
             time.sleep(1)
 
     print(f"❌ [{name}] 多次重试后采集失败")
-    return None
+    return []
 
 
 # --------------------------
