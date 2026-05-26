@@ -82,8 +82,31 @@ RSS_SOURCES = [
         "name": "医药魔方资讯",
         "url": "https://www.pharmcube.com/news/rss"
     }
+    {
+        "name": "医药魔方行业动态",
+        "url": "https://www.pharmacube.com/news/rss"
+    },
+    {
+        "name": "赛柏蓝医药资讯",
+        "url": "https://www.360doc.com/rss/10000000000000000000000000000000"
+    },
+    {
+        "name": "E药经理人",
+        "url": "https://www.yyaaa.com/feed"
+    },
+    {
+        "name": "药明康德资讯",
+        "url": "https://www.wuxiapptec.com/rss/news"
+    },
+    {
+        "name": "动脉网医药频道",
+        "url": "https://www.vcbeat.com/feed"
+    },
+    {
+        "name": "国家药监局NMPA公告",
+        "url": "https://www.nmpa.gov.cn/WS04/CL2199/rss.xml"
+    }
 ]
-
 # 请求头（模拟浏览器，防止拦截）
 HEADERS = {
     "User-Agent": (
